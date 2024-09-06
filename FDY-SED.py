@@ -237,69 +237,52 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class CustomCRNN(nn.Module):
-    def __init__(self, config):
-        super(CustomCRNN, self).__init__()
+class FrequencyDynamicModel(nn.Module):
+    def __init__(self, n_basis_kernels=4, temperature=31):
+        super(FrequencyDynamicModel, self).__init__()
 
-        # Feature extraction based on config
+        # Feature extraction block
         self.feature_extractor = nn.Sequential(
-            nn.Conv2d(config['n_input_ch'], 32, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(160, 32, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False),
             nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False),
             nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.MaxPool2d(2)
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 2))
         )
 
-        self.rnn = nn.LSTM(
-            input_size=config['n_filt'][-1],
-            hidden_size=config['n_RNN_cell'],
-            num_layers=config['n_RNN_layer'],
-            dropout=config['rec_dropout'],
-            batch_first=True,
-            bidirectional=True
+        # Frequency-adaptive attention layers with corrected input channels
+        self.attention_layers = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, None)),  # Pool over time axis
+            nn.Conv1d(8, 64, kernel_size=1),  # Use 8 channels as input based on the error
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Conv1d(64, n_basis_kernels, kernel_size=1),  # Output attention weights for kernels
+            nn.Softmax(dim=-1)
         )
 
-        self.fc = nn.Linear(config['n_RNN_cell'] * 2, config['n_class'])
-
-        # Frequency-Adaptive Attention
-        self.attention_conv1 = nn.Conv1d(config['n_filt'][-1], config['n_basis_kernels'], kernel_size=3, padding=1)
-        self.attention_conv2 = nn.Conv1d(config['n_basis_kernels'], config['n_basis_kernels'], kernel_size=3, padding=1)
-        self.temperature = config['temperature']
-
-        # Frequency-Dynamic Convolution
-        self.dynamic_conv = nn.Conv2d(config['n_filt'][-1], config['n_class'], kernel_size=3, stride=1, padding=1)
+        # Basis kernels and dynamic convolution
+        self.basis_kernels = nn.Parameter(torch.randn(n_basis_kernels, 160, 3, 3))  # Trainable basis kernels
+        self.temperature = temperature
 
     def forward(self, x):
-        batch_size = x.size(0)
-
-        # Feature extraction
+        # Pass through the feature extractor
         features = self.feature_extractor(x)
-        features = features.permute(0, 2, 3, 1)  # Change to (batch_size, seq_length, feature_dim, channels)
-        features = features.contiguous().view(batch_size, -1, features.size(2))  # Reshape for 1D conv
-
-        # Attention weights
-        avg_pooled = torch.mean(features, dim=-1)  # Average pooling over time axis
-        attention_weights = F.relu(self.attention_conv1(avg_pooled))
-        attention_weights = F.relu(self.attention_conv2(attention_weights))
-        attention_weights = F.softmax(attention_weights / self.temperature, dim=1)
-
+        
+        # Compute frequency-adaptive attention weights
+        batch_size, num_channels, height, width = features.size()
+        avg_pooled = features.mean(dim=3)  # Pool along the width axis
+        
+        attention_weights = F.relu(self.attention_layers(avg_pooled))  # Adjusted to match the input size
+        
+        # Compute dynamic convolution kernels
+        dynamic_kernel = torch.einsum('bchw, ojhw -> bchw', attention_weights, self.basis_kernels)
+        
         # Apply frequency-dynamic convolution
-        weighted_features = torch.bmm(features, attention_weights.unsqueeze(-1))  # Weighted sum of basis kernels
-        weighted_features = weighted_features.view(batch_size, -1, features.size(2), 1)
-        outputs = self.dynamic_conv(weighted_features)
-
-        return outputs
+        output = F.conv2d(features, dynamic_kernel)
+        
+        return output
 
 
 # Example usage
