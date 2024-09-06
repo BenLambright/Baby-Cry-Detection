@@ -106,7 +106,7 @@ def load_negative_samples(negative_audio_dir, sr=8000, target_length=8, interval
     return audio_sequences, sequence_labels
 
 
-audio_dir = '/Users/blambright/Downloads/mbzuai/ugrip_kaggle_data'
+audio_dir = 'ugrip_kaggle_data'
 json_path = 'combined_annotations_Approach5.json'
 audio_sequences, sequence_labels = load_audio_files_and_labels(json_path, audio_dir)
 print("Original Data Loaded Successfully!")
